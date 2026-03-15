@@ -23,6 +23,25 @@ TARGET_SPEAKER_ID = "primary_user"
 # Task 15: Global EMA AGC tracking
 ema_energy = 0.01
 
+# Enrollment State Tracker
+ENROLLMENT_STATE = {
+    "is_active": False,
+    "speaker_id": None,
+    "buffer": []
+}
+
+@app.post("/enroll/{speaker_id}")
+async def trigger_enrollment(speaker_id: str):
+    """
+    HTTP trigger to bypass the BSS filters and record the next ~5 seconds of raw audio for enrollment.
+    """
+    global ENROLLMENT_STATE
+    ENROLLMENT_STATE["is_active"] = True
+    ENROLLMENT_STATE["speaker_id"] = speaker_id
+    ENROLLMENT_STATE["buffer"] = []
+    logger.info(f"🎙️ ENROLLMENT MODE ACTIVE: Listening for '{speaker_id}'...")
+    return {"status": "success", "message": f"Enrollment active for {speaker_id}"}
+
 @app.on_event("startup")
 async def startup_event():
     global audio_buffer, vad_engine, speaker_db, inference_engine
@@ -74,6 +93,37 @@ async def websocket_endpoint(websocket: WebSocket):
 
             audio_int16 = np.frombuffer(data, dtype=np.int16)
             audio_float32 = audio_int16.astype(np.float32) / 32768.0
+            
+            # --- NEW: DYNAMIC ENROLLMENT INTERCEPT ---
+            global ENROLLMENT_STATE
+            if ENROLLMENT_STATE["is_active"]:
+                ENROLLMENT_STATE["buffer"].append(audio_float32)
+                
+                # If we have collected ~4.8 seconds of audio (150 chunks of 32ms)
+                if len(ENROLLMENT_STATE["buffer"]) >= 150:
+                    logger.info("Processing captured enrollment audio...")
+                    raw_audio = np.concatenate(ENROLLMENT_STATE["buffer"])
+                    
+                    # Convert to tensor and extract embedding using the warm TitaNet model
+                    audio_tensor = torch.from_numpy(raw_audio).cuda().unsqueeze(0)
+                    audio_len = torch.tensor([audio_tensor.shape[1]]).cuda()
+                    
+                    with torch.no_grad():
+                        _, emb = inference_engine.speaker_model.forward(input_signal=audio_tensor, input_signal_length=audio_len)
+                    
+                    emb_np = emb.cpu().numpy().flatten()
+                    emb_np = emb_np / np.linalg.norm(emb_np) # Normalize
+                    
+                    # Save to ChromaDB
+                    speaker_db.add_voiceprint(ENROLLMENT_STATE["speaker_id"], emb_np)
+                    logger.info(f"✅ Successfully enrolled voiceprint for: {ENROLLMENT_STATE['speaker_id']}")
+                    
+                    # Reset state and re-engage filters
+                    ENROLLMENT_STATE["is_active"] = False
+                    ENROLLMENT_STATE["buffer"] = []
+                    
+                continue # Skip the rest of the loop (Bypass Asteroid/VAD entirely)
+            # --- END ENROLLMENT INTERCEPT ---
             
             # 1. Update rolling context buffer (Overlap-Discard)
             context_buffer = np.roll(context_buffer, -512)
