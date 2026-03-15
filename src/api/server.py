@@ -60,25 +60,27 @@ async def websocket_endpoint(websocket: WebSocket):
     global audio_buffer, vad_engine, speaker_db, inference_engine
     
     import torchaudio
-    session_audio = []
-    prev_chunk = None
+    
+    # Load all enrolled profiles from ChromaDB
+    db_results = speaker_db.collection.get(include=['embeddings'])
+    active_profiles = {}
+    if db_results and db_results.get('embeddings') and len(db_results['embeddings']) > 0:
+        for i, spk_id in enumerate(db_results['ids']):
+            active_profiles[spk_id] = torch.tensor(db_results['embeddings'][i], dtype=torch.float32).cuda().unsqueeze(0)
+    else:
+        logger.warning("No speakers enrolled. Using dummy.")
+        active_profiles["dummy"] = torch.randn(1, 192).cuda()
+
+    # OLA Buffers per speaker
+    session_audio = {spk: [] for spk in active_profiles.keys()}
+    prev_chunks = {spk: None for spk in active_profiles.keys()}
+    speech_duration = {spk: 0.0 for spk in active_profiles.keys()}
+    
     overlap_len = 480 # 30ms overlap for aggressive transient suppression
     
     # Pre-calculate crossfade curves (Linear slope)
     fade_out = torch.linspace(1.0, 0.0, overlap_len)
     fade_in = torch.linspace(0.0, 1.0, overlap_len)
-        
-    # Rule 8: Accumulator for speech duration telemetry
-    speech_duration = 0.0
-    
-    # Pre-fetch target voiceprint for minimal latency
-    target_match = speaker_db.collection.get(ids=[TARGET_SPEAKER_ID], include=['embeddings'])
-    embeddings = target_match.get('embeddings')
-    if embeddings is not None and len(embeddings) > 0:
-        target_embedding = torch.tensor(target_match['embeddings'][0], dtype=torch.float32).cuda().unsqueeze(0)
-    else:
-        logger.warning(f"Target speaker {TARGET_SPEAKER_ID} not found in SpeakerDB. Using dummy.")
-        target_embedding = torch.randn(1, 192).cuda()
     
     # Task 16: Overlap-Discard Context Buffer
     CONTEXT_SIZE = 24000  # 1.5 seconds of context at 16kHz
@@ -133,64 +135,65 @@ async def websocket_endpoint(websocket: WebSocket):
             _ = vad_engine.process_chunk(audio_float32)
             
             # 3. Infer strictly once per frame IF speech is active
-            cleaned_audio = None
             if vad_engine.is_speech_active:
                 chunk_tensor = torch.from_numpy(context_buffer).cuda().view(1, 1, CONTEXT_SIZE).to(torch.float32)
-                cleaned_audio = inference_engine.extract_voice(chunk_tensor, target_embedding)
+                cleaned_outputs = inference_engine.extract_voices(chunk_tensor, active_profiles)
             else:
-                # Output silence when VAD is negative (Match context buffer size)
-                cleaned_audio = torch.zeros(1, 1, CONTEXT_SIZE, device='cuda')
+                # Output silence when VAD is negative
+                cleaned_outputs = {spk: torch.zeros(1, 1, CONTEXT_SIZE, device='cuda') for spk in active_profiles.keys()}
 
-            if cleaned_audio is not None and cleaned_audio.numel() > 0:
-                # OLA: Grab 512-hop + overlap_len lookahead.
-                # [-1024 : -(512-overlap_len)] = [-1024 : -32] for overlap_len=480.
-                extracted_audio_full = cleaned_audio.squeeze().cpu()
-                current_chunk = extracted_audio_full[-1024:-32] 
+            for spk_id, cleaned_audio in cleaned_outputs.items():
+                if cleaned_audio is not None and cleaned_audio.numel() > 0:
+                    # OLA: Grab 512-hop + overlap_len lookahead.
+                    extracted_audio_full = cleaned_audio.squeeze().cpu()
+                    current_chunk = extracted_audio_full[-1024:-32] 
+                    
+                    if current_chunk.numel() == (512 + overlap_len):
+                        if prev_chunks[spk_id] is not None:
+                            # Crossfade the tail of prev and head of current
+                            blended = (prev_chunks[spk_id][-overlap_len:] * fade_out) + (current_chunk[:overlap_len] * fade_in)
+                            
+                            prev_chunks[spk_id][-overlap_len:] = blended
+                            current_chunk[:overlap_len] = blended
+                            
+                            # COMMIT: Save the 512 samples. 
+                            session_audio[spk_id].append(prev_chunks[spk_id][:512])
+                            
+                            prev_chunks[spk_id] = current_chunk
+                        else:
+                            # Start of stream ramp-in
+                            initial_ramp = torch.linspace(0.0, 1.0, 512)
+                            current_chunk = current_chunk.clone()
+                            current_chunk[:512] *= initial_ramp
+                            prev_chunks[spk_id] = current_chunk
+                    
+                    # Extra check so duration only ticks if they are actually the one talking
+                    if vad_engine.is_speech_active and cleaned_audio.abs().max() > 0.01:
+                        speech_duration[spk_id] += 0.032
                 
-                if current_chunk.numel() == (512 + overlap_len):
-                    if prev_chunk is not None:
-                        # Crossfade the tail of prev and head of current
-                        blended = (prev_chunk[-overlap_len:] * fade_out) + (current_chunk[:overlap_len] * fade_in)
-                        
-                        prev_chunk[-overlap_len:] = blended
-                        current_chunk[:overlap_len] = blended
-                        
-                        # COMMIT: Save the 512 samples. 
-                        session_audio.append(prev_chunk[:512])
-                        
-                        prev_chunk = current_chunk
-                    else:
-                        # Start of stream ramp-in
-                        initial_ramp = torch.linspace(0.0, 1.0, 512)
-                        current_chunk = current_chunk.clone()
-                        current_chunk[:512] *= initial_ramp
-                        prev_chunk = current_chunk
-                
-                if vad_engine.is_speech_active:
-                    speech_duration += 0.032
-            
-            if not vad_engine.is_speech_active and speech_duration > 0:
-                logger.info(f"[SYSTEM] Speaker identified: {TARGET_SPEAKER_ID}. Total duration: {round(speech_duration, 4)}s.")
-                speech_duration = 0.0
+                if not vad_engine.is_speech_active and speech_duration[spk_id] > 0:
+                    logger.info(f"[SYSTEM] Speaker '{spk_id}' segment complete. Duration: {round(speech_duration[spk_id], 4)}s.")
+                    speech_duration[spk_id] = 0.0
                 
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
-        logger.info("Closing connection. Saving session audio...")
-        if prev_chunk is not None:
-            # Commit the last 512 samples
-            session_audio.append(prev_chunk[:512])
-            
-        if session_audio:
-            final_audio = torch.cat(session_audio, dim=-1).unsqueeze(0)
-            
-            # GLOBAL EOS NORMALIZATION:
-            max_amp = final_audio.abs().max()
-            if max_amp > 0.0:
-                final_audio = (final_audio / max_amp) * 0.90
+        logger.info("Closing connection. Saving session audio per speaker...")
+        for spk_id in active_profiles.keys():
+            if prev_chunks[spk_id] is not None:
+                session_audio[spk_id].append(prev_chunks[spk_id][:512])
                 
-            torchaudio.save("data/test_samples/extracted_output.wav", final_audio, 16000)
-            logger.info(f"Successfully saved globally normalized audio ({final_audio.shape[-1]/16000:.2f}s).")
+            if session_audio[spk_id]:
+                final_audio = torch.cat(session_audio[spk_id], dim=-1).unsqueeze(0)
+                
+                # GLOBAL EOS NORMALIZATION:
+                max_amp = final_audio.abs().max()
+                if max_amp > 0.0:
+                    final_audio = (final_audio / max_amp) * 0.90
+                    
+                output_path = f"data/test_samples/extracted_{spk_id}.wav"
+                torchaudio.save(output_path, final_audio, 16000)
+                logger.info(f"Successfully saved audio for {spk_id} to {output_path} ({final_audio.shape[-1]/16000:.2f}s).")
         
         vad_engine.reset()
         logger.info("WebSocket endpoint cleanup complete.")

@@ -27,15 +27,12 @@ class InferenceEngine:
         logger.info("Initializing DNS64 Artifact Scrubber...")
         self.cleaner = torch.hub.load('facebookresearch/denoiser', 'dns64').cuda().eval()
         
-        # Sticky Picker Trackers (Task 26)
-        self.ema_score_0 = 0.0
-        self.ema_score_1 = 0.0
-        self.is_fading_in = True 
-        
-        # Hang-Time Holdover (Task 27)
-        self.hang_time_frames = 0
-        self.MAX_HANG_TIME = 6  # 190ms holdover to decapitate replies
-        self.locked_channel = 0  # NEW: Tracks the last valid target channel
+        # Multi-Target Trackers
+        self.ema_scores = {} # {speaker_id: {0: score, 1: score}}
+        self.hang_time_frames = {}
+        self.locked_channel = {}
+        self.is_fading_in = {}
+        self.MAX_HANG_TIME = 6 
         
         # Warmup all models for zero-jitter streaming
         with torch.no_grad():
@@ -45,9 +42,9 @@ class InferenceEngine:
             
         logger.info("Dual-Engine Extraction fully initialized.")
 
-    def extract_voice(self, chunk_tensor: torch.Tensor, voiceprint_tensor: torch.Tensor) -> torch.Tensor:
+    def extract_voices(self, chunk_tensor: torch.Tensor, target_profiles: dict) -> dict:
         """
-        Separates overlapping audio, picks target, and scrubs artifacts.
+        Separates overlapping audio, evaluates all target profiles, and returns a dict of extracted voices.
         """
         with torch.no_grad():
             # 1. Blind Source Separation (BSS)
@@ -56,46 +53,58 @@ class InferenceEngine:
             source_0 = sources[:, 0, :]
             source_1 = sources[:, 1, :]
             
-            # 2. Smart Picking Score
+            # 2. Extract embeddings for both sources
             audio_len = torch.tensor([source_0.shape[1]]).cuda()
             _, emb_0 = self.speaker_model.forward(input_signal=source_0, input_signal_length=audio_len)
             _, emb_1 = self.speaker_model.forward(input_signal=source_1, input_signal_length=audio_len)
             
-            score_0 = F.cosine_similarity(emb_0, voiceprint_tensor).mean().item()
-            score_1 = F.cosine_similarity(emb_1, voiceprint_tensor).mean().item()
-            
-            # 3. Peak Asymmetric EMA
-            self.ema_score_0 = score_0 if score_0 > self.ema_score_0 else (0.80 * self.ema_score_0 + 0.20 * score_0)
-            self.ema_score_1 = score_1 if score_1 > self.ema_score_1 else (0.80 * self.ema_score_1 + 0.20 * score_1)
-            
-            # 4 & 5. SINGLE-THRESHOLD CHANNEL LOCK (Peak Configuration)
-            if self.ema_score_0 >= self.ema_score_1:
-                current_best_score, current_best_channel = self.ema_score_0, 0
-            else:
-                current_best_score, current_best_channel = self.ema_score_1, 1
+            outputs = {}
+            for speaker_id, voiceprint_tensor in target_profiles.items():
+                if speaker_id not in self.ema_scores:
+                    self.ema_scores[speaker_id] = {0: 0.0, 1: 0.0}
+                    self.hang_time_frames[speaker_id] = 0
+                    self.locked_channel[speaker_id] = 0
+                    self.is_fading_in[speaker_id] = True
+                    
+                # 3. Smart Picking Scores per speaker
+                score_0 = F.cosine_similarity(emb_0, voiceprint_tensor).mean().item()
+                score_1 = F.cosine_similarity(emb_1, voiceprint_tensor).mean().item()
                 
-            CONFIDENCE_THRESHOLD = 0.30 
-            
-            if current_best_score >= CONFIDENCE_THRESHOLD:
-                self.locked_channel = current_best_channel
-                self.hang_time_frames = self.MAX_HANG_TIME
-                winner = source_0 if self.locked_channel == 0 else source_1
-            else:
-                self.hang_time_frames -= 1
-                if self.hang_time_frames > 0:
-                    winner = source_0 if self.locked_channel == 0 else source_1
+                # 4. Independent Asymmetric EMA per speaker
+                self.ema_scores[speaker_id][0] = score_0 if score_0 > self.ema_scores[speaker_id][0] else (0.80 * self.ema_scores[speaker_id][0] + 0.20 * score_0)
+                self.ema_scores[speaker_id][1] = score_1 if score_1 > self.ema_scores[speaker_id][1] else (0.80 * self.ema_scores[speaker_id][1] + 0.20 * score_1)
+                
+                # 5. Channel Lock per speaker
+                if self.ema_scores[speaker_id][0] >= self.ema_scores[speaker_id][1]:
+                    current_best_score, current_best_channel = self.ema_scores[speaker_id][0], 0
                 else:
-                    self.hang_time_frames = 0
-                    self.is_fading_in = True 
-                    return torch.zeros(1, 1, source_0.shape[-1], device=source_0.device)
-            
-            # 6. The Scrubber
-            cleaned_audio = self.cleaner(winner.unsqueeze(1))
-            
-            # 7. ANTI-POP LINEAR FADE-IN
-            if getattr(self, 'is_fading_in', False):
-                fade_curve = torch.linspace(0.0, 1.0, steps=cleaned_audio.shape[-1], device=cleaned_audio.device)
-                cleaned_audio = cleaned_audio * fade_curve
-                self.is_fading_in = False
+                    current_best_score, current_best_channel = self.ema_scores[speaker_id][1], 1
+                    
+                CONFIDENCE_THRESHOLD = 0.30 
                 
-            return cleaned_audio
+                if current_best_score >= CONFIDENCE_THRESHOLD:
+                    self.locked_channel[speaker_id] = current_best_channel
+                    self.hang_time_frames[speaker_id] = self.MAX_HANG_TIME
+                    winner = source_0 if self.locked_channel[speaker_id] == 0 else source_1
+                else:
+                    self.hang_time_frames[speaker_id] -= 1
+                    if self.hang_time_frames[speaker_id] > 0:
+                        winner = source_0 if self.locked_channel[speaker_id] == 0 else source_1
+                    else:
+                        self.hang_time_frames[speaker_id] = 0
+                        self.is_fading_in[speaker_id] = True 
+                        outputs[speaker_id] = torch.zeros(1, 1, source_0.shape[-1], device=source_0.device)
+                        continue
+                
+                # 6. Scrub artifacts
+                cleaned_audio = self.cleaner(winner.unsqueeze(1))
+                
+                # 7. Anti-pop Linear Fade-in per speaker
+                if self.is_fading_in[speaker_id]:
+                    fade_curve = torch.linspace(0.0, 1.0, steps=cleaned_audio.shape[-1], device=cleaned_audio.device)
+                    cleaned_audio = cleaned_audio * fade_curve
+                    self.is_fading_in[speaker_id] = False
+                    
+                outputs[speaker_id] = cleaned_audio
+                
+            return outputs
