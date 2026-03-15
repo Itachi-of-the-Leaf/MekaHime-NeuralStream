@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+websockets
+torch
+torchaudio
+torch-tensorrt
+chromadb
+numpy
+onnxruntime
