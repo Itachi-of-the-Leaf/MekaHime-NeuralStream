@@ -4,21 +4,20 @@ This file acts as the primary system prompt and architectural map for Cursor AI 
 
 ## 🆔 Project Identity
 - **Name**: MekaHime Streaming Core
-- **Purpose**: Real-time Multi-Target Continuous Speech Separation (CSS) and Live Transcription.
+- **Purpose**: Real-time Multi-Target Continuous Speech Separation (CSS) and Audio Isolation.
 
 ## 🛠️ Tech Stack & Models
 - **Web Framework**: FastAPI (Uvicorn ASGI)
 - **Deep Learning**: PyTorch
 - **Audio Separation (BSS)**: Asteroid (Conv-TasNet)
 - **Speaker Verification**: NeMo TitaNet
-- **Speech-to-Text (ASR)**: faster-whisper (tiny.en)
 - **Vector Store**: ChromaDB (hnsw:space: cosine)
 
 ## 🗺️ Architecture Map
 
 ### `src/api/server.py`
 - **Role**: ASGI entry point and WebSocket handler.
-- **Key Logic**: 1024-byte accumulator, OLA crossfading, segment-based ASR firing, and dynamic enrollment triggers.
+- **Key Logic**: 1024-byte accumulator, OLA crossfading, and dynamic enrollment triggers.
 
 ### `src/core/inference.py`
 - **Role**: The Mathematical & Inference Core.

@@ -1,18 +1,17 @@
 # MekaHime Streaming Core: Real-Time Multi-Target BSS
 
-MekaHime Streaming Core is a state-of-the-art server designed for **16kHz Real-Time Continuous Speech Separation (CSS)** and **Live Transcription**. It enables simultaneous extraction of multiple enrolled speakers from a single audio stream, delivering high-fidelity voice isolation even in overlapping speech scenarios.
+MekaHime Streaming Core is a state-of-the-art server designed for **16kHz Real-Time Continuous Speech Separation (CSS)** and Audio Isolation. It enables simultaneous extraction of multiple enrolled speakers from a single audio stream, delivering high-fidelity voice isolation even in overlapping speech scenarios.
 
 ## 🚀 Core Features
 
 - **Multi-Target Blind Source Separation (BSS)**: Leverages **Asteroid Conv-TasNet** for aggressive, high-quality audio separation.
 - **Smart Speaker Tracking**: Real-time channel locking powered by **TitaNet** voiceprint induction and Asymmetric EMA scoring.
-- **Real-Time Speech-to-Text**: Integrated **faster-whisper** (tiny.en) for near-instant transcription of separated segments.
 - **Hardware Stability**: Robust WebSocket streaming with a **Byte Accumulator** to handle variable Windows WASAPI hardware buffer sizes.
 - **Dynamic Enrollment**: Live enrollment trigger allows registering new voiceprints via HTTP without server restart.
 
 ## 🏗️ Architecture Flow
 
-`Mic` → `WebSocket` → `Byte Accumulator` → `VAD` → `BSS (Conv-TasNet)` → `TitaNet EMA Locking` → `faster-whisper` → `OLA Buffer` → `Output WAV`
+`Mic` → `WebSocket` → `Byte Accumulator` → `VAD` → `BSS (Conv-TasNet)` → `TitaNet EMA Locking` → `OLA Buffer` → `Output WAV`
 
 ## 🛠️ Setup & Installation
 
@@ -24,7 +23,7 @@ MekaHime Streaming Core is a state-of-the-art server designed for **16kHz Real-T
 ### 2. Dependencies
 ```bash
 conda activate mekahime_core
-pip install fastapi uvicorn websockets sounddevice numpy torch torchaudio faster-whisper
+pip install fastapi uvicorn websockets sounddevice numpy torch torchaudio
 # Additional model-specific packages (NeMo/Asteroid) should be installed per environment guidelines.
 ```
 

@@ -6,7 +6,6 @@ from src.core.memory import RingBuffer
 from src.core.vad import VADEngine
 from src.core.speaker_db import SpeakerDB
 from src.core.inference import InferenceEngine
-from faster_whisper import WhisperModel
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -18,7 +17,6 @@ audio_buffer: RingBuffer = None
 vad_engine: VADEngine = None
 speaker_db: SpeakerDB = None
 inference_engine: InferenceEngine = None
-whisper_node = None
 
 TARGET_SPEAKER_ID = "primary_user"
 
@@ -46,24 +44,21 @@ async def trigger_enrollment(speaker_id: str):
 
 @app.on_event("startup")
 async def startup_event():
-    global audio_buffer, vad_engine, speaker_db, inference_engine, whisper_node
+    global audio_buffer, vad_engine, speaker_db, inference_engine
     if audio_buffer is None:
         audio_buffer = RingBuffer(name="/tmp/mekahime_audio_buffer.bin", size=16000*60) # 60s buffer
     vad_engine = VADEngine()
     speaker_db = SpeakerDB()
     inference_engine = InferenceEngine()
     
-    logger.info("Initializing Whisper ASR Node (tiny.en)...")
-    whisper_node = WhisperModel("tiny.en", device="cuda", compute_type="float16")
-    
-    logger.info("All components (VAD, DB, Inference, Whisper) initialized and warm.")
+    logger.info("All components (VAD, DB, Inference) initialized and warm.")
 
 @app.websocket("/ws/audio_stream")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     logger.info("WebSocket connection established")
     
-    global audio_buffer, vad_engine, speaker_db, inference_engine, whisper_node
+    global audio_buffer, vad_engine, speaker_db, inference_engine
     
     import torchaudio
     
@@ -82,9 +77,8 @@ async def websocket_endpoint(websocket: WebSocket):
     prev_chunks = {spk: None for spk in active_profiles.keys()}
     speech_duration = {spk: 0.0 for spk in active_profiles.keys()}
     
-    # Tracking variables for Byte Accumulator and ASR
+    # Tracking for Byte Accumulator
     incoming_buffer = bytearray()
-    segment_start_idx = {spk: 0 for spk in active_profiles.keys()}
     
     overlap_len = 480 # 30ms overlap for aggressive transient suppression
     
@@ -179,22 +173,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     if not vad_engine.is_speech_active and speech_duration[spk_id] > 0:
                         logger.info(f"[SYSTEM] Speaker '{spk_id}' segment complete. Duration: {round(speech_duration[spk_id], 4)}s.")
-                        
-                        # --- NEW: WHISPER ASR TRANSLATION ---
-                        try:
-                            segment_audio_list = session_audio[spk_id][segment_start_idx[spk_id]:]
-                            if segment_audio_list:
-                                segment_tensor = torch.cat(segment_audio_list, dim=-1)
-                                segment_np = segment_tensor.cpu().numpy().flatten()
-                                
-                                segments, _ = whisper_node.transcribe(segment_np, beam_size=1)
-                                text = "".join([s.text for s in segments]).strip()
-                                if text:
-                                    print(f"\n🗣️ [{spk_id}]: {text}\n")
-                        except Exception as e:
-                            logger.error(f"Whisper Transcription Error: {e}")
-                            
-                        segment_start_idx[spk_id] = len(session_audio[spk_id])
                         speech_duration[spk_id] = 0.0
                 
     except Exception as e:
