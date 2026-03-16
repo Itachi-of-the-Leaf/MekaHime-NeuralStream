@@ -1,9 +1,8 @@
 fastapi
 uvicorn
 websockets
+sounddevice
+numpy
 torch
 torchaudio
-torch-tensorrt
-chromadb
-numpy
-onnxruntime
+faster-whisper

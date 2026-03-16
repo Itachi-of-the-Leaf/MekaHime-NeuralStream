@@ -69,6 +69,7 @@ class InferenceEngine:
                 # 3. Smart Picking Scores per speaker
                 score_0 = F.cosine_similarity(emb_0, voiceprint_tensor).mean().item()
                 score_1 = F.cosine_similarity(emb_1, voiceprint_tensor).mean().item()
+                print(f"📊 [Scoring] {speaker_id} | Ch0: {score_0:.3f} | Ch1: {score_1:.3f}")
                 
                 # 4. Independent Asymmetric EMA per speaker
                 self.ema_scores[speaker_id][0] = score_0 if score_0 > self.ema_scores[speaker_id][0] else (0.80 * self.ema_scores[speaker_id][0] + 0.20 * score_0)
@@ -80,7 +81,8 @@ class InferenceEngine:
                 else:
                     current_best_score, current_best_channel = self.ema_scores[speaker_id][1], 1
                     
-                CONFIDENCE_THRESHOLD = 0.30 
+                # Lowered to 0.10 to allow for room echo/speaker distortion matches
+                CONFIDENCE_THRESHOLD = 0.10
                 
                 if current_best_score >= CONFIDENCE_THRESHOLD:
                     self.locked_channel[speaker_id] = current_best_channel
