@@ -16,11 +16,9 @@ class VADEngine:
         self.chunk_size = 512  # Strict math constraint
         
         # Load Silero VAD model
-        # Using local path to bypass GitHub 502 errors (local cache from previous runs)
-        cached_repo_dir = '/home/soham/.cache/torch/hub/snakers4_silero-vad_master'
-        model, utils = torch.hub.load(repo_or_dir=cached_repo_dir,
+        # Load Silero VAD model via standard torch hub
+        model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
                                       model='silero_vad',
-                                      source='local',
                                       trust_repo=True)
         self.model = model
         self.get_speech_timestamps, self.save_audio, self.read_audio, self.VADIterator, self.collect_chunks = utils

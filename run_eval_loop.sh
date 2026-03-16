@@ -5,7 +5,7 @@ sleep 1
 echo "Starting Server..."
 # Force mekahime_core environment activation in the subshell if needed
 # However, the agent is already in the env.
-/home/soham/miniconda3/envs/mekahime_core/bin/python3 main.py > server.log 2>&1 &
+python3 main.py > server.log 2>&1 &
 SERVER_PID=$!
 
 # Wait for server to be fully warm
@@ -20,13 +20,13 @@ while ! grep -q "Dual-Engine Extraction fully initialized." server.log; do
 done
 
 echo "Server ready. Running stream simulator..."
-/home/soham/miniconda3/envs/mekahime_core/bin/python3 src/utils/stream_simulator.py data/test_samples/noisy_overlap_mix.wav
+python3 src/utils/stream_simulator.py data/test_samples/noisy_overlap_mix.wav
 
 echo "Waiting for server to save OLA output..."
 sleep 2
 
 echo "Running Critic Evaluator..."
-/home/soham/miniconda3/envs/mekahime_core/bin/python3 src/utils/auto_evaluator.py data/test_samples/extracted_output.wav
+python3 src/utils/auto_evaluator.py data/test_samples/extracted_output.wav
 
 echo "Cleaning up..."
 kill $SERVER_PID
